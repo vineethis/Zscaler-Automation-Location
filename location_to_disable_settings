@@ -1,0 +1,206 @@
+import requests
+import json
+import os
+import logging
+import time
+
+
+# Set up logging
+logging.basicConfig(filename='update_locations.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Replace these with your Zscaler API credentials
+ZSCALER_USERNAME = 'your_username'
+ZSCALER_PASSWORD = 'your_password'
+ZSCALER_API_KEY = 'your_api_key'
+ZSCALER_BASE_URL = 'https://zsapi.zscalerthree.net/api/v1'
+
+
+# Function to obfuscate the API key
+def obfuscate_api_key(api_key, timestamp):
+    high = timestamp[-6:]
+    low = str(int(high) >> 1)
+    obfuscated_api_key = ''
+
+    while len(low) < 6:
+        low = '0' + low
+
+    for i in high:
+        obfuscated_api_key += api_key[int(i)]
+
+    for j in low:
+        obfuscated_api_key += api_key[int(j) + 2]
+
+    return obfuscated_api_key
+
+# Function to authenticate and get a session cookie
+def authenticate():
+    timestamp = str(int(time.time() * 1000))  # Current time in milliseconds
+    obfuscated_api_key = obfuscate_api_key(ZSCALER_API_KEY, timestamp)
+
+    url = f"{ZSCALER_BASE_URL}/authenticatedSession"
+    headers = {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+    }
+    payload = {
+        'apiKey': obfuscated_api_key,
+        'username': ZSCALER_USERNAME,
+        'password': ZSCALER_PASSWORD,
+        'timestamp': timestamp
+    }
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code == 200:
+        return response.cookies
+    else:
+        print(f"Authentication failed with status code: {response.status_code}")
+        print(f"Response body: {response.text}")
+        raise Exception("Authentication failed")
+    
+def list_json_files_and_select():
+    # List all JSON files in the current directory
+    json_files = [f for f in os.listdir('.') if f.endswith('.json')]
+    if not json_files:
+        print("No JSON files found in the current directory.")
+        return None
+
+    # Display the list of files with corresponding numbers
+    for idx, file in enumerate(json_files):
+        print(f"{idx + 1}: {file}")
+
+    # Prompt the user to select a file
+    while True:
+        try:
+            file_number = int(input("Enter the number of the JSON file to process: "))
+            if 1 <= file_number <= len(json_files):
+                return json_files[file_number - 1]
+            else:
+                print(f"Please enter a number between 1 and {len(json_files)}.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+
+def update_location(location,session_cookies):
+    try:
+        # Construct the PUT request URL using the location's ID
+        url = f"{ZSCALER_BASE_URL}/locations/{location['id']}"
+        headers = {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+        }
+        # Update the fields 'ofwEnabled' and 'ipsControl' to False if both need to be diabled or hash the one not required.
+        #location['ofwEnabled'] = False
+        location['ipsControl'] = False
+        # Send the PUT request with the entire updated location record to the specific location endpoint
+        response = requests.put(url, json=location, headers=headers, cookies=session_cookies)
+        response.raise_for_status()  # Raises an HTTPError if the HTTP request returned an unsuccessful status code
+        # Wait for a specified number of seconds
+        time.sleep(1)  # Waits for 1 second; adjust the duration as needed
+        return response
+    except requests.exceptions.HTTPError as http_err:
+        logging.error(f"HTTP error occurred: {http_err} - {http_err.response.text}")
+        print(f"HTTP error occurred: {http_err} - {http_err.response.text}")
+    except Exception as err:
+        logging.error(f"An error occurred: {err}")
+        print(f"An error occurred: {err}")
+
+
+def process_file(file_path,session_cookies):
+    try:
+        with open(file_path, 'r') as file:
+            locations = json.load(file)
+            for location in locations:
+                # Check the current values and update if necessary
+                if (location['ipsControl']):
+                    response = update_location(location,session_cookies)
+                    if response and response.status_code == 200:
+                        print(f"IPS contol for location {location['id']} ({location['name']}) disabled successfully.")
+                        logging.info(f"IPS contol for location {location['id']} ({location['name']}) disabled successfully.")
+                    else:
+                        print(f"Failed disable IPS control for  {location['id']} ({location['name']})")
+                        logging.error(f"Failed disable IPS control for  {location['id']} ({location['name']})")
+                else:
+                    print(f"No update needed for location  {location['id']} ({location['name']}) because 'ipsControl' is already disabled.")
+                    logging.info(f"No update needed for location  {location['id']} ({location['name']}) because 'ipsControl' is already disabled.")
+    except FileNotFoundError:
+        logging.error(f"File not found: {file_path}")
+        print(f"File not found: {file_path}")
+    except json.JSONDecodeError:
+        logging.error(f"Invalid JSON in file: {file_path}")
+        print(f"Invalid JSON in file: {file_path}")
+    except Exception as err:
+        logging.error(f"An error occurred while processing the file: {err}")
+        print(f"An error occurred while processing the file: {err}")
+
+#To activate the configuration changes 
+def activate(session_cookies):
+    try:
+        url = f"{ZSCALER_BASE_URL}/status/activate"
+        headers = {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+        }
+        response = requests.post(url,headers=headers,cookies=session_cookies)
+        response.raise_for_status()  # Raises an HTTPError if the HTTP request returned an unsuccessful status code
+        # Log and print success message
+        success_message = f"configuration activation completed."
+        print(success_message)
+        logging.info(success_message)
+        # Wait for a specified number of seconds
+        time.sleep(1)  # Waits for 1 second; adjust the duration as needed
+        return response
+    except requests.exceptions.HTTPError as http_err:
+        logging.error(f"HTTP error occurred: {http_err} - {http_err.response.text}")
+        print(f"HTTP error occurred: {http_err} - {http_err.response.text}")
+    except Exception as err:
+        logging.error(f"An error occurred: {err}")
+        print(f"An error occurred: {err}")
+
+#To end the session 
+def end_session(session_cookies):
+    try:
+        url = f"{ZSCALER_BASE_URL}/authenticatedSession"
+        # headers variable is not needed since we're not sending a JSON payload in DELETE request
+        response = requests.delete(url, cookies=session_cookies)
+        response.raise_for_status()  # Raises an HTTPError if the HTTP request returned an unsuccessful status code
+        success_message = f"session terminated sucessfully."
+        print(success_message)
+        logging.info(success_message)
+        # Wait for a specified number of seconds
+        time.sleep(1)  # Waits for 1 second; adjust the duration as needed
+        return response
+    except requests.exceptions.HTTPError as http_err:
+        error_message = f"HTTP error occurred while disabling IPS control for location: {http_err} - {http_err.response.text}"
+        logging.error(error_message)
+        print(error_message)
+        
+    except Exception as err:
+        error_message = f"HTTP error occurred while disabling IPS control for location: {err}"
+        logging.error(error_message)
+        print(error_message)
+              
+        
+def main():
+    # Authenticate and get session cookies
+    session_cookies = authenticate()
+    if not session_cookies:
+        logging.error("Failed to authenticate with Zscaler API.")
+        print("Failed to authenticate with Zscaler API.")
+        return  # Exit the script if authentication fails
+    # List JSON files and allow the user to select
+    selected_file = list_json_files_and_select()
+    if selected_file:
+        sucess=f'login sucessful.'
+        logging.error(sucess)
+        print(sucess)
+        print(f"Processing file: {selected_file}")
+        logging.info(f"Processing file: {selected_file}")
+        process_file(selected_file, session_cookies)  # Pass session_cookies here
+    # After updating all locations, send a POST request to activate the status
+    activate(session_cookies)
+    # End the session
+    end_session(session_cookies)
+
+if __name__ == "__main__":
+    main()
+
+
